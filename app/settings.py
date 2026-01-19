@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     whisper_compute_type: str = "int8"  # int8 for CPU, float16 for GPU
     whisper_language: str = "en"  # Language code or "auto" for auto-detection
     
+    # Echonet event posting
+    echonet_source_id: str = "microphone"
+    echonet_room: str = "default"
+    
     # Discovery settings (mDNS)
     discovery_enabled: bool = True
     discovery_name: str = "Echonet"

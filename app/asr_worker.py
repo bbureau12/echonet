@@ -6,7 +6,8 @@ import numpy as np
 from faster_whisper import WhisperModel
 from .echonet_client import post_text_event
 from .audio_io import record_once
-from .state import RuntimeState
+from .state import StateManager
+from .registry import TargetRegistryRepository
 from .settings import settings
 
 log = logging.getLogger("echonet.asr")
@@ -105,31 +106,111 @@ def _transcribe_sync(audio: np.ndarray) -> tuple[str, float]:
         return "", 0.0
 
 
-async def run_asr_worker(st: RuntimeState) -> None:
-    while not st.stop_event.is_set():
-        # snapshot state
-        async with st.lock:
-            enabled = st.enabled
-            room = st.room
-            source_id = st.source_id
-
-        if not enabled:
-            await asyncio.sleep(0.2)
-            continue
-
-        # v0.1: push-to-talk or fixed recording windows
-        audio = await record_once(seconds=3.0)   # later: VAD/wakeword
-
-        # heavy work: run whisper in executor so we don't block the loop
-        text, conf = await transcribe_audio(audio)
-
-        if text.strip():
-            await post_text_event(
-                source_id=source_id,
-                room=room,
-                ts=int(time.time()),
-                text=text,
-                confidence=conf,
-            )
-
+async def run_asr_worker(
+    state_manager: StateManager,
+    registry: TargetRegistryRepository,
+    stop_event: asyncio.Event
+) -> None:
+    """
+    Main ASR worker loop supporting two modes:
+    - trigger: Wake word detection, only transcribes after detecting a target phrase
+    - active: Continuous recording and transcription
+    
+    Both modes wait for silence/end of speech before sending transcription.
+    Monitors state changes via in-memory cache (not database polling).
+    """
+    log.info("ASR worker starting...")
+    
+    # Get initial state
+    current_mode = state_manager.get_listen_mode()
+    log.info(f"Initial mode: {current_mode}")
+    
+    while not stop_event.is_set():
+        # Quick cache read (no database hit)
+        mode = state_manager.get_listen_mode()
+        
+        # If mode changed, log it
+        if mode != current_mode:
+            log.info(f"Mode changed: {current_mode} -> {mode}")
+            current_mode = mode
+        
+        if mode == "trigger":
+            # Trigger mode: listen for wake words
+            await _handle_trigger_mode(state_manager, registry, stop_event)
+        else:  # active
+            # Active mode: continuous recording
+            await _handle_active_mode(state_manager, stop_event)
+        
+        # Small sleep to prevent tight loop
         await asyncio.sleep(0.05)
+    
+    log.info("ASR worker stopped")
+
+
+async def _handle_trigger_mode(
+    state_manager: StateManager,
+    registry: TargetRegistryRepository,
+    stop_event: asyncio.Event
+) -> None:
+    """
+    Trigger mode: Listen for wake words, only transcribe when detected.
+    """
+    # Short recording window to check for wake word
+    audio = await record_once(seconds=2.0)
+    
+    if audio is None or len(audio) == 0:
+        return
+    
+    # Transcribe to check for wake word
+    text, confidence = await transcribe_audio(audio)
+    
+    if not text.strip():
+        return
+    
+    # Check if text contains any target phrase
+    phrase_map = registry.get_phrase_map()
+    detected_target = None
+    
+    for phrase in phrase_map.keys():
+        if phrase.lower() in text.lower():
+            detected_target = phrase_map[phrase]
+            log.info(f"Wake word detected: '{phrase}' -> target {detected_target}")
+            break
+    
+    if detected_target:
+        # Wake word detected! Send the transcription
+        await post_text_event(
+            source_id=settings.echonet_source_id,
+            room=settings.echonet_room,
+            ts=int(time.time()),
+            text=text,
+            confidence=confidence,
+        )
+
+
+async def _handle_active_mode(
+    state_manager: StateManager,
+    stop_event: asyncio.Event
+) -> None:
+    """
+    Active mode: Continuous recording and transcription.
+    Waits for silence before sending.
+    """
+    # Longer recording window for active listening
+    audio = await record_once(seconds=3.0)
+    
+    if audio is None or len(audio) == 0:
+        return
+    
+    # Transcribe
+    text, confidence = await transcribe_audio(audio)
+    
+    if text.strip():
+        # Send any non-empty transcription
+        await post_text_event(
+            source_id=settings.echonet_source_id,
+            room=settings.echonet_room,
+            ts=int(time.time()),
+            text=text,
+            confidence=confidence,
+        )

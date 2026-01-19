@@ -7,6 +7,7 @@ with automatic change logging for audit trail.
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +46,21 @@ class StateManager:
         before creating the StateManager instance.
         """
         self.db_path = str(db_path)
+        # In-memory cache for fast reads (避免频繁数据库查询)
+        self._cache: dict[str, str] = {}
+        self._cache_loaded = False
+        # Event to notify workers of state changes
+        self._state_changed = asyncio.Event()
+    
+    def _ensure_cache_loaded(self) -> None:
+        """Load all settings into cache on first access."""
+        if self._cache_loaded:
+            return
+        
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT name, value FROM settings").fetchall()
+            self._cache = {row["name"]: row["value"] for row in rows}
+            self._cache_loaded = True
     
     def _get_connection(self) -> sqlite3.Connection:
         """Get a database connection."""
@@ -72,8 +88,8 @@ class StateManager:
     
     def get_value(self, name: str, default: Optional[str] = None) -> Optional[str]:
         """Get just the value of a setting, with optional default."""
-        setting = self.get(name)
-        return setting.value if setting else default
+        self._ensure_cache_loaded()
+        return self._cache.get(name, default)
     
     def set(
         self,
@@ -93,14 +109,16 @@ class StateManager:
             reason: Why the change was made
             description: Description of the setting (only used for new settings)
         """
+        self._ensure_cache_loaded()
+        
+        # Get old value if it exists
+        old_value = self._cache.get(name)
+        
+        # Don't log if value hasn't changed
+        if old_value == value:
+            return
+        
         with self._get_connection() as conn:
-            # Get old value if it exists
-            old_value = self.get_value(name)
-            
-            # Don't log if value hasn't changed
-            if old_value == value:
-                return
-            
             # Upsert the setting
             conn.execute("""
                 INSERT INTO settings (name, value, updated_at, description)
@@ -118,6 +136,11 @@ class StateManager:
             """, (name, old_value, value, source, reason))
             
             conn.commit()
+        
+        # Update cache and notify workers
+        self._cache[name] = value
+        self._state_changed.set()
+        self._state_changed.clear()
     
     def all(self) -> list[Setting]:
         """Get all settings."""
@@ -212,3 +235,27 @@ class StateManager:
     def is_active_mode(self) -> bool:
         """Check if currently in active listening mode."""
         return self.get_listen_mode() == "active"
+    
+    async def wait_for_state_change(self, timeout: Optional[float] = None) -> bool:
+        """
+        Wait for any state change to occur.
+        
+        Args:
+            timeout: Maximum time to wait in seconds (None = wait forever)
+            
+        Returns:
+            True if state changed, False if timeout occurred
+        """
+        try:
+            await asyncio.wait_for(self._state_changed.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+    
+    def get_cached_state(self) -> dict[str, str]:
+        """
+        Get a snapshot of all cached state values.
+        Fast, read-only access for workers.
+        """
+        self._ensure_cache_loaded()
+        return self._cache.copy()

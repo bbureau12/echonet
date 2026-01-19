@@ -87,7 +87,10 @@ async def startup():
     
     # Start ASR worker
     log.info("Starting ASR worker...")
-    app.state.asr_task = asyncio.create_task(run_asr_worker(state))
+    app.state.asr_stop_event = asyncio.Event()
+    app.state.asr_task = asyncio.create_task(
+        run_asr_worker(state, registry, app.state.asr_stop_event)
+    )
 
 @app.on_event("shutdown")
 async def _shutdown():
@@ -96,7 +99,10 @@ async def _shutdown():
         discovery.stop()
     
     # Stop ASR worker
-    state.stop_event.set()
+    stop_event = getattr(app.state, "asr_stop_event", None)
+    if stop_event:
+        stop_event.set()
+    
     task = getattr(app.state, "asr_task", None)
     if task:
         task.cancel()
