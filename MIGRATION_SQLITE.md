@@ -68,12 +68,18 @@ Migrations are normally run automatically when the application starts, but the m
 - Pre-creating the database before first run
 - Verifying migration state
 
-### Current Schema Version: v1
+### Current Schema Version: v2
 
 **v1 - Initial Schema**
 - `schema_version` table - tracks migration history
 - `targets` table - stores target registrations
 - Case-insensitive name index
+
+**v2 - State Tracking** (Added: 2026-01-19)
+- `settings` table - current application state (key-value pairs)
+- `settings_log` table - audit trail of all state changes
+- Default `listen_mode` setting ('trigger' or 'active')
+- Automatic change logging with source and reason tracking
 
 ## API Changes
 

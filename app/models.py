@@ -45,3 +45,10 @@ class EchonetTextOut(BaseModel):
     mode: Literal["triggered", "open_listen"] = "triggered"
     text: str
     confidence: Optional[float] = None
+
+
+class StateUpdate(BaseModel):
+    target: str = Field(..., min_length=1, max_length=32, description="Target name that triggered the state change")
+    source: str = Field(..., min_length=1, max_length=64, description="Source of the state change (e.g., 'llm', 'timeout', 'user')")
+    state: Literal["trigger", "active"] = Field(..., description="New state: 'trigger' (idle) or 'active' (listening for response)")
+    reason: Optional[str] = Field(default=None, max_length=200, description="Optional reason for the state change")

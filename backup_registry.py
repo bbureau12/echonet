@@ -85,9 +85,9 @@ def restore_from_json(json_path: str, db_path: str, merge: bool = False):
         run_migrations(db_path)
         
         # Import using the TargetRegistry class to ensure proper schema
-        from app.registry import Target, TargetRegistry
+        from app.registry import Target, TargetRegistryRepository
         
-        registry = TargetRegistry(db_path=db_path)
+        registry = TargetRegistryRepository(db_path=db_path)
         
         for target_data in targets:
             target = Target(

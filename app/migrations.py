@@ -48,6 +48,7 @@ class MigrationManager:
             # Run migrations in order
             migrations = [
                 (1, self._migrate_v1_initial_schema),
+                (2, self._migrate_v2_state_tracking),
             ]
             
             for version, migration_func in migrations:
@@ -95,6 +96,56 @@ class MigrationManager:
         
         conn.commit()
         log.info("Created initial schema: schema_version, targets, indexes")
+
+    def _migrate_v2_state_tracking(self, conn: sqlite3.Connection) -> None:
+        """
+        Migration v2: State and settings tracking
+        - Create settings table for key-value state (e.g., listen_mode)
+        - Create settings_log table for audit trail of state changes
+        """
+        # Settings table for current state
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                name TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                description TEXT
+            )
+        """)
+        
+        # Settings log for change history
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                old_value TEXT,
+                new_value TEXT NOT NULL,
+                changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                source TEXT,
+                reason TEXT
+            )
+        """)
+        
+        # Index for efficient log queries
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_settings_log_name 
+            ON settings_log(name, changed_at DESC)
+        """)
+        
+        # Initialize default listen_mode setting
+        conn.execute("""
+            INSERT INTO settings (name, value, description)
+            VALUES ('listen_mode', 'trigger', 'Current listening mode: trigger (idle) or active (responding to LLM)')
+        """)
+        
+        # Log the initial setting
+        conn.execute("""
+            INSERT INTO settings_log (name, old_value, new_value, source, reason)
+            VALUES ('listen_mode', NULL, 'trigger', 'migration', 'Initial setup')
+        """)
+        
+        conn.commit()
+        log.info("Created state tracking: settings, settings_log tables with default listen_mode")
 
 
 def run_migrations(db_path: str | Path) -> None:

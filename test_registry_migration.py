@@ -4,7 +4,7 @@ Quick test script to verify the SQLite registry implementation.
 Run this to ensure the migration from in-memory to SQLite works correctly.
 """
 
-from app.registry import Target, TargetRegistry
+from app.registry import Target, TargetRegistryRepository
 from app.migrations import run_migrations
 import os
 import tempfile
@@ -26,7 +26,7 @@ def test_registry():
         print("✅ Migrations completed")
         
         # Initialize registry
-        registry = TargetRegistry(db_path=test_db.name)
+        registry = TargetRegistryRepository(db_path=test_db.name)
         print("✅ Registry initialized")
         
         # Test upsert
@@ -96,7 +96,7 @@ def test_registry():
         print("✅ Delete non-existent returns False")
         
         # Test persistence - create new registry instance with same DB
-        registry2 = TargetRegistry(db_path=test_db.name)
+        registry2 = TargetRegistryRepository(db_path=test_db.name)
         persisted = registry2.get("astraea")
         assert persisted is not None
         assert persisted.base_url == "http://astraea.local:9002"

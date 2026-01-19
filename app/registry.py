@@ -17,7 +17,7 @@ class Target:
         return self.base_url.rstrip("/") + "/listen"
 
 
-class TargetRegistry:
+class TargetRegistryRepository:
     def __init__(self, db_path: str | Path = "echonet_registry.db"):
         """
         Initialize the target registry.

@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from .models import RouteDecision, SessionState, TargetRegistration, TextIn, EchonetTextOut
-from .registry import Target, TargetRegistry
+from app.asr_worker import run_asr_worker
+
+from .models import RouteDecision, SessionState, TargetRegistration, TextIn, EchonetTextOut, StateUpdate
+from .registry import Target, TargetRegistryRepository
 from .router import PhraseRouter, SessionManager
 from .security import require_api_key, require_admin_key
 from .settings import settings
 from .forwarder import TargetForwarder, make_event_id
 from .migrations import run_migrations
+from .state import StateManager
+from .discovery import DiscoveryService
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("echonet")
@@ -22,10 +27,14 @@ app = FastAPI(title="Echonet", version="0.1.0")
 log.info("Running database migrations...")
 run_migrations(settings.db_path)
 
-registry = TargetRegistry(db_path=settings.db_path)
+registry = TargetRegistryRepository(db_path=settings.db_path)
+state = StateManager(db_path=settings.db_path)
 sessions = SessionManager(timeout_s=settings.session_timeout_s)
 phrase_router = PhraseRouter(cancel_phrases=settings.cancel_phrases.split(","))
 forwarder = TargetForwarder()
+
+# mDNS Discovery service
+discovery: DiscoveryService | None = None
 
 
 @app.middleware("http")
@@ -34,16 +43,101 @@ async def auth_middleware(request: Request, call_next):
     if resp is not None:
         return resp
     return await call_next(request)
+    app.state.runtime = state
 
+@app.on_event("startup")
+async def startup():
+    global discovery
+    
+    # Load registered targets and initialize phrase router
+    log.info("Loading registered targets...")
+    targets = registry.all()
+    if targets:
+        log.info(f"Found {len(targets)} registered target(s):")
+        for target in targets:
+            log.info(f"  - {target.name}: {len(target.phrases)} phrase(s)")
+    else:
+        log.info("No targets registered yet. Use POST /register to add targets.")
+    
+    # Initialize state to configured default mode
+    current_mode = state.get_listen_mode()
+    if current_mode != settings.initial_listen_mode:
+        log.info(f"Setting initial listen mode to '{settings.initial_listen_mode}'")
+        state.set_listen_mode(
+            mode=settings.initial_listen_mode,
+            source="startup",
+            reason=f"Application startup - configured default mode"
+        )
+    else:
+        log.info(f"Listen mode already set to '{current_mode}'")
+    
+    # Start mDNS discovery if enabled
+    if settings.discovery_enabled:
+        log.info("Starting mDNS discovery service...")
+        discovery = DiscoveryService(
+            instance_name=settings.discovery_name,
+            host=settings.discovery_host,
+            port=settings.port,
+            zone=settings.discovery_zone,
+            subzone=settings.discovery_subzone,
+        )
+        discovery.start()
+    else:
+        log.info("mDNS discovery disabled")
+    
+    # Start ASR worker
+    log.info("Starting ASR worker...")
+    app.state.asr_task = asyncio.create_task(run_asr_worker(state))
 
 @app.on_event("shutdown")
 async def _shutdown():
+    # Stop discovery
+    if discovery:
+        discovery.stop()
+    
+    # Stop ASR worker
+    state.stop_event.set()
+    task = getattr(app.state, "asr_task", None)
+    if task:
+        task.cancel()
+    
     await forwarder.close()
 
 
 @app.get("/health")
 async def health():
     return {"ok": True, "service": "echonet", "version": "0.1.0"}
+
+
+@app.get("/handshake")
+async def handshake():
+    """
+    Returns discovery and configuration information.
+    Useful for LLMs and other services to verify connectivity and understand capabilities.
+    """
+    return {
+        "ok": True,
+        "discovery": {
+            "enabled": settings.discovery_enabled,
+            "instance_name": settings.discovery_name,
+            "host": settings.discovery_host,
+            "zone": settings.discovery_zone,
+            "subzone": settings.discovery_subzone,
+            "port": settings.port,
+        },
+        "capabilities": {
+            "asr": True,
+            "target_routing": True,
+            "session_management": True,
+            "state_tracking": True,
+        },
+        "config": {
+            "session_timeout_s": settings.session_timeout_s,
+            "cancel_phrases": settings.cancel_phrases.split(","),
+        },
+        "version": "0.1.0",
+    }
+
 
 
 @app.post("/register")
@@ -83,6 +177,101 @@ async def delete_target(request: Request, name: str):
         return JSONResponse(
             status_code=404,
             content={"ok": False, "error": f"Target '{name}' not found"}
+        )
+
+
+@app.get("/state")
+async def get_state():
+    """Get current application state/settings."""
+    settings_list = state.all()
+    return {
+        "ok": True,
+        "settings": [
+            {
+                "name": s.name,
+                "value": s.value,
+                "updated_at": s.updated_at,
+                "description": s.description
+            }
+            for s in settings_list
+        ],
+        "listen_mode": state.get_listen_mode()
+    }
+
+
+@app.get("/state/history")
+async def get_state_history(name: str = None, limit: int = 50):
+    """Get state change history."""
+    if limit > 500:
+        limit = 500  # Cap at 500 to prevent excessive queries
+    
+    changes = state.get_history(name=name, limit=limit)
+    return {
+        "ok": True,
+        "count": len(changes),
+        "changes": [
+            {
+                "id": c.id,
+                "name": c.name,
+                "old_value": c.old_value,
+                "new_value": c.new_value,
+                "changed_at": c.changed_at,
+                "source": c.source,
+                "reason": c.reason
+            }
+            for c in changes
+        ]
+    }
+
+
+@app.put("/state")
+async def update_state(request: Request, update: StateUpdate):
+    """
+    Update the listen mode state.
+    
+    Validates that the target exists before updating state.
+    Requires admin key if configured.
+    """
+    # Optional admin key
+    resp = require_admin_key(request)
+    if resp is not None:
+        return resp
+    
+    # Verify target exists
+    target = registry.get(update.target)
+    if target is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "ok": False,
+                "error": f"Target '{update.target}' not found. Register the target first."
+            }
+        )
+    
+    # Update the state
+    try:
+        # Build a descriptive reason if not provided
+        reason = update.reason
+        if not reason:
+            reason = f"State change requested by {update.target}"
+        
+        state.set_listen_mode(
+            mode=update.state,
+            source=f"{update.source}:{update.target}",
+            reason=reason
+        )
+        
+        return {
+            "ok": True,
+            "listen_mode": update.state,
+            "target": update.target,
+            "source": update.source,
+            "message": f"Listen mode set to '{update.state}' by target '{update.target}'"
+        }
+    except ValueError as e:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": str(e)}
         )
 
 

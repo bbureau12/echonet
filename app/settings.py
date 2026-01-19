@@ -22,6 +22,26 @@ class Settings(BaseSettings):
     
     # Database path for target registry
     db_path: str = "echonet_registry.db"
+    
+    # Initial state on startup
+    initial_listen_mode: str = "trigger"  # "trigger" or "active"
+    
+    # ASR (Faster Whisper) settings
+    whisper_model: str = "base"  # tiny, base, small, medium, large-v2, large-v3
+    whisper_device: str = "cpu"  # cpu or cuda
+    whisper_compute_type: str = "int8"  # int8 for CPU, float16 for GPU
+    whisper_language: str = "en"  # Language code or "auto" for auto-detection
+    
+    # Discovery settings (mDNS)
+    discovery_enabled: bool = True
+    discovery_name: str = "Echonet"
+    discovery_host: str = "echonet"
+    discovery_zone: str = "home"
+    discovery_subzone: str = "main-floor"
+    
+    # Security settings
+    allowlist: str = "localhost,127.0.0.1"  # Comma-separated IPs and DNS names
+    rate_limit_per_min: int = 60
 
 
 settings = Settings()
