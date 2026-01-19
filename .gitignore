@@ -61,6 +61,12 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
+# Echonet - SQLite registry database
+echonet_registry.db
+echonet_registry.db-journal
+echonet_registry.db-wal
+echonet_registry.db-shm
+
 # Flask stuff:
 instance/
 .webassets-cache

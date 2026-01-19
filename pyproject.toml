@@ -1,0 +1,22 @@
+[project]
+name = "echonet"
+version = "0.1.0"
+description = "Echonet — lightweight text event router + session manager for EchoBell/Astraea"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Beau Bureau" }]
+
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
+  "pydantic>=2.6",
+  "pydantic-settings>=2.2",
+  "httpx>=0.27"
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.5", "pytest>=8.0"]
+
+[tool.ruff]
+line-length = 100
