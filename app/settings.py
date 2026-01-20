@@ -37,9 +37,21 @@ class Settings(BaseSettings):
     audio_sample_rate: int = 16000  # Sample rate in Hz (16kHz is good for speech recognition)
     audio_channels: int = 1  # Number of channels (1 = mono, 2 = stereo)
     
+    # Voice Activity Detection (VAD) settings
+    audio_silence_duration: float = 1.0  # Seconds of silence before stopping recording
+    audio_min_duration: float = 0.5  # Minimum recording duration in seconds
+    audio_max_duration: float = 30.0  # Maximum recording duration in seconds (safety timeout)
+    audio_energy_threshold: float = 0.01  # Energy threshold for silence detection (0.0-1.0)
+    audio_use_whisper_vad: bool = True  # Use Faster Whisper's VAD for speech detection (more accurate than energy-only)
+    
     # Echonet event posting
     echonet_source_id: str = "microphone"
     echonet_room: str = "default"
+    
+    # Testing settings
+    test_mode: bool = False  # Use pre-recorded audio files instead of microphone
+    test_audio_dir: str = "test_audio"  # Directory containing test WAV files
+    test_loop_delay: float = 2.0  # Seconds between processing test files
     
     # Discovery settings (mDNS)
     discovery_enabled: bool = True

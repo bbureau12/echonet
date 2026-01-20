@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import io
+import numpy as np
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, File, UploadFile
 from fastapi.responses import JSONResponse
 
-from app.asr_worker import run_asr_worker
+from app.asr_worker import run_asr_worker, set_text_handler, transcribe_audio
 from app.audio_io import list_audio_devices, get_default_device, AudioDevice
 
 from .models import (
     RouteDecision, SessionState, TargetRegistration, TextIn, EchonetTextOut, StateUpdate,
-    AudioDeviceInfo, AudioDeviceList, AudioDeviceSelection
+    AudioDeviceInfo, AudioDeviceList, AudioDeviceSelection, TranscriptionResponse
 )
 from .registry import Target, TargetRegistryRepository
 from .router import PhraseRouter, SessionManager
@@ -146,6 +149,9 @@ async def startup():
         discovery.start()
     else:
         log.info("mDNS discovery disabled")
+    
+    # Set up text handler for ASR worker (so it can route wake words)
+    set_text_handler(ingest_text)
     
     # Start ASR worker
     log.info("Starting ASR worker...")
@@ -529,3 +535,102 @@ async def set_audio_device(selection: AudioDeviceSelection):
         "device_name": device_name,
         "message": f"Audio device changed to: {device_name}"
     }
+
+
+# ========== Testing Endpoints ==========
+
+@app.post("/test/transcribe", response_model=TranscriptionResponse, tags=["testing"])
+async def test_transcribe_audio(
+    file: UploadFile = File(...),
+    process_text: bool = False
+):
+    """
+    Test endpoint: Upload an audio file for transcription.
+    
+    Supports common formats: WAV, MP3, FLAC, OGG, etc.
+    
+    Args:
+        file: Audio file to transcribe
+        process_text: If true, also route the transcribed text through the normal flow
+        
+    Returns:
+        Transcription result with optional routing decision
+    """
+    try:
+        start_time = time.time()
+        
+        # Read the uploaded file
+        audio_bytes = await file.read()
+        
+        # Load audio using soundfile or wave
+        try:
+            import soundfile as sf
+            audio_data, sample_rate = sf.read(io.BytesIO(audio_bytes), dtype='float32')
+        except Exception as e:
+            # Fallback to wave for simple WAV files
+            import wave
+            with wave.open(io.BytesIO(audio_bytes), 'rb') as wav:
+                sample_rate = wav.getframerate()
+                n_frames = wav.getnframes()
+                audio_bytes_raw = wav.readframes(n_frames)
+                # Convert to float32
+                if wav.getsampwidth() == 2:  # 16-bit
+                    audio_data = np.frombuffer(audio_bytes_raw, dtype=np.int16).astype(np.float32) / 32768.0
+                else:
+                    raise HTTPException(status_code=400, detail=f"Unsupported audio format: {e}")
+        
+        # Convert to mono if stereo
+        if len(audio_data.shape) > 1:
+            audio_data = np.mean(audio_data, axis=1)
+        
+        duration = len(audio_data) / sample_rate
+        
+        # Transcribe
+        text, confidence = await transcribe_audio(audio_data)
+        
+        processing_time = time.time() - start_time
+        
+        route_decision = None
+        if process_text and text.strip():
+            # Route through normal text ingestion flow
+            text_input = TextIn(
+                source_id="test_upload",
+                room=settings.echonet_room,
+                ts=int(time.time()),
+                text=text,
+                confidence=confidence
+            )
+            route_decision = await ingest_text(text_input)
+        
+        return TranscriptionResponse(
+            text=text,
+            confidence=confidence,
+            duration=duration,
+            processing_time=processing_time,
+            route_decision=route_decision
+        )
+        
+    except Exception as e:
+        log.error(f"Transcription test failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+
+
+@app.post("/test/simulate-speech", response_model=RouteDecision, tags=["testing"])
+async def test_simulate_speech(text_input: TextIn):
+    """
+    Test endpoint: Simulate speech input without microphone or audio file.
+    
+    Routes the text through the normal ingestion flow as if it came from the microphone.
+    Useful for testing wake word detection, routing, and session management.
+    
+    Example:
+        POST /test/simulate-speech
+        {
+            "source_id": "test_mic",
+            "room": "living-room",
+            "ts": 1234567890,
+            "text": "hey astraea, what's the weather?",
+            "confidence": 0.95
+        }
+    """
+    return await ingest_text(text_input)

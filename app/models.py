@@ -72,3 +72,12 @@ class AudioDeviceList(BaseModel):
 class AudioDeviceSelection(BaseModel):
     """Request to change audio device."""
     device_index: int = Field(..., ge=0, description="Audio device index to use")
+
+
+class TranscriptionResponse(BaseModel):
+    """Response from transcription test endpoint."""
+    text: str = Field(..., description="Transcribed text")
+    confidence: float = Field(..., description="Transcription confidence (0.0-1.0)")
+    duration: float = Field(..., description="Audio duration in seconds")
+    processing_time: float = Field(..., description="Time taken to transcribe in seconds")
+    route_decision: Optional[RouteDecision] = Field(None, description="Routing decision if text was processed")
