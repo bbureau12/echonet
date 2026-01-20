@@ -259,3 +259,29 @@ class StateManager:
         """
         self._ensure_cache_loaded()
         return self._cache.copy()
+    
+    # Convenience methods for audio device
+    
+    def get_audio_device_index(self) -> int:
+        """Get the current audio device index."""
+        value = self.get_value("audio_device_index", default="0")
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    
+    def set_audio_device_index(
+        self,
+        device_index: int,
+        source: Optional[str] = None,
+        reason: Optional[str] = None
+    ) -> None:
+        """
+        Set the audio device index.
+        
+        Args:
+            device_index: Device index to use
+            source: What triggered the change
+            reason: Why the change was made
+        """
+        self.set("audio_device_index", str(device_index), source=source, reason=reason)

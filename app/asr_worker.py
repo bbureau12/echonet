@@ -109,6 +109,8 @@ def _transcribe_sync(audio: np.ndarray) -> tuple[str, float]:
 async def run_asr_worker(
     state_manager: StateManager,
     registry: TargetRegistryRepository,
+    audio_devices: list,
+    initial_device_index: int,
     stop_event: asyncio.Event
 ) -> None:
     """
@@ -118,12 +120,22 @@ async def run_asr_worker(
     
     Both modes wait for silence/end of speech before sending transcription.
     Monitors state changes via in-memory cache (not database polling).
+    
+    Args:
+        state_manager: State manager for reading listen mode
+        registry: Target registry for wake word phrase matching
+        audio_devices: List of available audio devices
+        initial_device_index: Initial device index to use
+        stop_event: Event to signal worker shutdown
     """
     log.info("ASR worker starting...")
     
     # Get initial state
     current_mode = state_manager.get_listen_mode()
     log.info(f"Initial mode: {current_mode}")
+    
+    # Track device index (updated from cache if multiple devices)
+    device_index = initial_device_index
     
     while not stop_event.is_set():
         # Quick cache read (no database hit)
@@ -134,12 +146,19 @@ async def run_asr_worker(
             log.info(f"Mode changed: {current_mode} -> {mode}")
             current_mode = mode
         
+        # If multiple devices, check for device changes
+        if len(audio_devices) > 1:
+            cached_device = state_manager.get_audio_device_index()
+            if cached_device != device_index:
+                log.info(f"Audio device changed: {device_index} -> {cached_device}")
+                device_index = cached_device
+        
         if mode == "trigger":
             # Trigger mode: listen for wake words
-            await _handle_trigger_mode(state_manager, registry, stop_event)
+            await _handle_trigger_mode(state_manager, registry, device_index, stop_event)
         else:  # active
             # Active mode: continuous recording
-            await _handle_active_mode(state_manager, stop_event)
+            await _handle_active_mode(state_manager, device_index, stop_event)
         
         # Small sleep to prevent tight loop
         await asyncio.sleep(0.05)
@@ -150,13 +169,19 @@ async def run_asr_worker(
 async def _handle_trigger_mode(
     state_manager: StateManager,
     registry: TargetRegistryRepository,
+    device_index: int,
     stop_event: asyncio.Event
 ) -> None:
     """
     Trigger mode: Listen for wake words, only transcribe when detected.
     """
     # Short recording window to check for wake word
-    audio = await record_once(seconds=2.0)
+    audio = await record_once(
+        seconds=2.0,
+        device_index=device_index,
+        sample_rate=settings.audio_sample_rate,
+        channels=settings.audio_channels
+    )
     
     if audio is None or len(audio) == 0:
         return
@@ -190,6 +215,7 @@ async def _handle_trigger_mode(
 
 async def _handle_active_mode(
     state_manager: StateManager,
+    device_index: int,
     stop_event: asyncio.Event
 ) -> None:
     """
@@ -197,7 +223,12 @@ async def _handle_active_mode(
     Waits for silence before sending.
     """
     # Longer recording window for active listening
-    audio = await record_once(seconds=3.0)
+    audio = await record_once(
+        seconds=3.0,
+        device_index=device_index,
+        sample_rate=settings.audio_sample_rate,
+        channels=settings.audio_channels
+    )
     
     if audio is None or len(audio) == 0:
         return

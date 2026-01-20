@@ -52,3 +52,23 @@ class StateUpdate(BaseModel):
     source: str = Field(..., min_length=1, max_length=64, description="Source of the state change (e.g., 'llm', 'timeout', 'user')")
     state: Literal["trigger", "active"] = Field(..., description="New state: 'trigger' (idle) or 'active' (listening for response)")
     reason: Optional[str] = Field(default=None, max_length=200, description="Optional reason for the state change")
+
+
+class AudioDeviceInfo(BaseModel):
+    """Audio device information for API responses."""
+    index: int = Field(..., description="Device index")
+    name: str = Field(..., description="Device name")
+    channels: int = Field(..., description="Number of input channels")
+    sample_rate: float = Field(..., description="Default sample rate")
+    is_default: bool = Field(..., description="True if this is the system default device")
+
+
+class AudioDeviceList(BaseModel):
+    """List of audio devices with current selection."""
+    devices: list[AudioDeviceInfo] = Field(..., description="Available audio input devices")
+    current_index: int = Field(..., description="Currently selected device index")
+
+
+class AudioDeviceSelection(BaseModel):
+    """Request to change audio device."""
+    device_index: int = Field(..., ge=0, description="Audio device index to use")

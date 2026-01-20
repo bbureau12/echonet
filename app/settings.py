@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     whisper_compute_type: str = "int8"  # int8 for CPU, float16 for GPU
     whisper_language: str = "en"  # Language code or "auto" for auto-detection
     
+    # Audio device settings
+    audio_device_index: int = 0  # Default audio input device index (0 = first device or system default)
+    audio_sample_rate: int = 16000  # Sample rate in Hz (16kHz is good for speech recognition)
+    audio_channels: int = 1  # Number of channels (1 = mono, 2 = stereo)
+    
     # Echonet event posting
     echonet_source_id: str = "microphone"
     echonet_room: str = "default"

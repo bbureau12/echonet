@@ -3,12 +3,16 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 
 from app.asr_worker import run_asr_worker
+from app.audio_io import list_audio_devices, get_default_device, AudioDevice
 
-from .models import RouteDecision, SessionState, TargetRegistration, TextIn, EchonetTextOut, StateUpdate
+from .models import (
+    RouteDecision, SessionState, TargetRegistration, TextIn, EchonetTextOut, StateUpdate,
+    AudioDeviceInfo, AudioDeviceList, AudioDeviceSelection
+)
 from .registry import Target, TargetRegistryRepository
 from .router import PhraseRouter, SessionManager
 from .security import require_api_key, require_admin_key
@@ -36,6 +40,10 @@ forwarder = TargetForwarder()
 # mDNS Discovery service
 discovery: DiscoveryService | None = None
 
+# Audio devices (populated at startup)
+audio_devices: list[AudioDevice] = []
+selected_device_index: int = 0
+
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
@@ -47,7 +55,61 @@ async def auth_middleware(request: Request, call_next):
 
 @app.on_event("startup")
 async def startup():
-    global discovery
+    global discovery, audio_devices, selected_device_index
+    
+    # Enumerate audio devices
+    log.info("Enumerating audio input devices...")
+    try:
+        audio_devices = list_audio_devices()
+        
+        if not audio_devices:
+            log.warning("No audio input devices found!")
+        elif len(audio_devices) == 1:
+            log.info(f"Found 1 audio device: {audio_devices[0].name}")
+            selected_device_index = audio_devices[0].index
+        else:
+            log.info(f"Found {len(audio_devices)} audio input devices:")
+            for device in audio_devices:
+                default_marker = " (DEFAULT)" if device.is_default else ""
+                log.info(f"  [{device.index}] {device.name}{default_marker}")
+            
+            # Get device from cache, fallback to config, then default
+            cached_index = state.get_audio_device_index()
+            
+            # Check if cached index is valid
+            if any(d.index == cached_index for d in audio_devices):
+                selected_device_index = cached_index
+                log.info(f"Using cached audio device index: {selected_device_index}")
+            else:
+                # Use config default or system default
+                if settings.audio_device_index == 0:
+                    # Try to find system default
+                    default_device = get_default_device()
+                    if default_device:
+                        selected_device_index = default_device.index
+                        log.info(f"Using system default audio device: {default_device.name} (index {selected_device_index})")
+                    else:
+                        selected_device_index = audio_devices[0].index
+                        log.info(f"Using first available audio device: {audio_devices[0].name} (index {selected_device_index})")
+                else:
+                    # Use configured index if valid
+                    if any(d.index == settings.audio_device_index for d in audio_devices):
+                        selected_device_index = settings.audio_device_index
+                        log.info(f"Using configured audio device index: {selected_device_index}")
+                    else:
+                        log.warning(f"Configured device index {settings.audio_device_index} not found, using first device")
+                        selected_device_index = audio_devices[0].index
+                
+                # Save to cache
+                state.set_audio_device_index(
+                    selected_device_index,
+                    source="startup",
+                    reason="Initial device selection"
+                )
+    except Exception as e:
+        log.error(f"Failed to enumerate audio devices: {e}")
+        audio_devices = []
+        selected_device_index = 0
     
     # Load registered targets and initialize phrase router
     log.info("Loading registered targets...")
@@ -89,7 +151,7 @@ async def startup():
     log.info("Starting ASR worker...")
     app.state.asr_stop_event = asyncio.Event()
     app.state.asr_task = asyncio.create_task(
-        run_asr_worker(state, registry, app.state.asr_stop_event)
+        run_asr_worker(state, registry, audio_devices, selected_device_index, app.state.asr_stop_event)
     )
 
 @app.on_event("shutdown")
@@ -409,3 +471,61 @@ async def ingest_text(inp: TextIn):
 
     # 3) No trigger, no session => idle
     return RouteDecision(handled=False, mode="idle", reason="no_trigger_no_session")
+
+
+# ========== Audio Device Management Endpoints ==========
+
+@app.get("/audio/devices", response_model=AudioDeviceList, tags=["audio"])
+async def get_audio_devices():
+    """
+    Get a list of all available audio input devices and the currently selected one.
+    """
+    current_index = state.get_audio_device_index()
+    
+    return AudioDeviceList(
+        devices=[
+            AudioDeviceInfo(
+                index=device.index,
+                name=device.name,
+                channels=device.channels,
+                sample_rate=device.sample_rate,
+                is_default=device.is_default
+            )
+            for device in audio_devices
+        ],
+        current_index=current_index
+    )
+
+
+@app.put("/audio/device", tags=["audio"])
+async def set_audio_device(selection: AudioDeviceSelection):
+    """
+    Set the audio input device to use for recording.
+    The change takes effect on the next recording cycle.
+    """
+    # Validate device index exists
+    if not any(d.index == selection.device_index for d in audio_devices):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid device index {selection.device_index}. Available: {[d.index for d in audio_devices]}"
+        )
+    
+    # Update cache
+    state.set_audio_device_index(
+        selection.device_index,
+        source="api",
+        reason="User selected audio device"
+    )
+    
+    # Update global variable for worker
+    global selected_device_index
+    selected_device_index = selection.device_index
+    
+    device_name = next((d.name for d in audio_devices if d.index == selection.device_index), "Unknown")
+    
+    return {
+        "status": "ok",
+        "device_index": selection.device_index,
+        "device_name": device_name,
+        "message": f"Audio device changed to: {device_name}"
+    }
