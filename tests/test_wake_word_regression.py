@@ -1,11 +1,22 @@
 """
-Regression tests for wake word detection.
+COMPONENT/REGRESSION TESTS for wake word detection.
 
-Tests the ASR worker's ability to:
-1. Detect wake words in audio files
-2. Extract the correct phrase
-3. Respect session boundaries (silence gaps)
-4. Route to the correct target
+These tests verify individual components work correctly:
+- VAD stops at silence gaps using chunked streaming (simulates production)
+- Transcription produces correct text from audio
+- Wake word "peter" is present in transcribed text
+- Routing logic maps wake words to correct targets
+
+What these tests do NOT cover:
+- Actual _handle_trigger_mode() function call (see test_integration_modes.py)
+- End-to-end flow through trigger mode handler
+
+Test approach:
+1. Stream WAV file in chunks (0.5s) to simulate real-time audio
+2. Apply Whisper VAD to detect silence and stop recording
+3. Transcribe captured audio
+4. Manually check if wake word appears in text
+5. Verify routing mappings separately
 """
 import pytest
 import asyncio
