@@ -187,6 +187,182 @@ async def stream_audio_file(file_path: str, chunk_duration: float = 0.1):
         return
 
 
+async def simulate_record_until_silence_from_file(
+    file_path: str,
+    silence_duration: float = 1.0,
+    min_duration: float = 0.5,
+    max_duration: float = 30.0,
+    energy_threshold: float = 0.01,
+    use_whisper_vad: bool = True
+) -> Optional[np.ndarray]:
+    """
+    Simulate record_until_silence() by streaming a WAV file and applying the same VAD logic.
+    This allows testing the actual recording process without a microphone.
+    
+    Args:
+        file_path: Path to audio file (WAV, MP3, FLAC, etc.)
+        silence_duration: Seconds of silence before stopping (default: 1.0s)
+        min_duration: Minimum recording duration in seconds (default: 0.5s)
+        max_duration: Maximum recording duration in seconds (default: 30s)
+        energy_threshold: Audio energy threshold for initial sound detection (0.0-1.0)
+        use_whisper_vad: Use Faster Whisper's VAD for speech detection (default: True)
+        
+    Returns:
+        NumPy array of audio samples that would have been captured, or None on error
+    """
+    try:
+        import soundfile as sf
+        
+        loop = asyncio.get_event_loop()
+        audio = await loop.run_in_executor(
+            None,
+            _simulate_record_until_silence_from_file_sync,
+            file_path,
+            silence_duration,
+            min_duration,
+            max_duration,
+            energy_threshold,
+            use_whisper_vad
+        )
+        return audio
+        
+    except Exception as e:
+        log.error(f"Failed to simulate recording from file {file_path}: {e}")
+        return None
+
+
+def _simulate_record_until_silence_from_file_sync(
+    file_path: str,
+    silence_duration: float,
+    min_duration: float,
+    max_duration: float,
+    energy_threshold: float,
+    use_whisper_vad: bool
+) -> Optional[np.ndarray]:
+    """Synchronous simulation of VAD recording from file (runs in thread pool)."""
+    import soundfile as sf
+    
+    # Use same chunk size as real recording
+    chunk_duration = 0.5 if use_whisper_vad else 0.1
+    silence_chunks_needed = int(silence_duration / chunk_duration)
+    
+    chunks = []
+    silence_counter = 0
+    speech_detected = False
+    total_duration = 0.0
+    
+    # Load Whisper for VAD if needed
+    whisper_model = None
+    if use_whisper_vad:
+        try:
+            from faster_whisper import WhisperModel
+            log.debug("Loading Whisper model for VAD simulation...")
+            whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
+        except Exception as e:
+            log.warning(f"Failed to load Whisper for VAD, falling back to energy-based: {e}")
+            use_whisper_vad = False
+    
+    vad_method = "Whisper VAD" if use_whisper_vad else "energy-based"
+    log.info(f"Simulating record_until_silence from file ({vad_method})...")
+    
+    try:
+        with sf.SoundFile(file_path) as audio_file:
+            sample_rate = audio_file.samplerate
+            channels = audio_file.channels
+            chunk_samples = int(chunk_duration * sample_rate)
+            
+            chunk_counter = 0
+            
+            while total_duration < max_duration:
+                # Read next chunk
+                chunk = audio_file.read(chunk_samples, dtype='float32')
+                
+                if len(chunk) == 0:
+                    log.debug(f"End of file reached at {total_duration:.1f}s")
+                    break
+                
+                # Convert to mono if needed
+                if channels > 1 and len(chunk.shape) > 1:
+                    mono_chunk = np.mean(chunk, axis=1)
+                else:
+                    mono_chunk = chunk.flatten() if len(chunk.shape) > 1 else chunk
+                
+                # Resample to 16kHz if needed
+                if sample_rate != 16000:
+                    ratio = 16000 / sample_rate
+                    new_length = int(len(mono_chunk) * ratio)
+                    mono_chunk = np.interp(
+                        np.linspace(0, len(mono_chunk), new_length),
+                        np.arange(len(mono_chunk)),
+                        mono_chunk
+                    )
+                
+                # Ensure float32 dtype for Whisper VAD
+                mono_chunk = mono_chunk.astype(np.float32)
+                
+                chunks.append(mono_chunk)
+                chunk_counter += 1
+                chunk_actual_duration = len(mono_chunk) / 16000
+                total_duration += chunk_actual_duration
+                
+                # Energy check
+                energy = np.sqrt(np.mean(mono_chunk ** 2))
+                is_speech = False
+                
+                if energy < energy_threshold:
+                    is_speech = False
+                elif use_whisper_vad and whisper_model:
+                    # Verify with Whisper VAD
+                    try:
+                        segments, info = whisper_model.transcribe(
+                            mono_chunk,
+                            vad_filter=True,
+                            vad_parameters=dict(
+                                min_silence_duration_ms=300,
+                                threshold=0.5
+                            )
+                        )
+                        segment_list = list(segments)
+                        is_speech = len(segment_list) > 0
+                        
+                        if is_speech:
+                            speech_detected = True
+                            log.debug(f"Chunk {chunk_counter} ({total_duration:.1f}s): Speech detected (energy={energy:.4f})")
+                        else:
+                            log.debug(f"Chunk {chunk_counter} ({total_duration:.1f}s): No speech (energy={energy:.4f})")
+                            
+                    except Exception as e:
+                        log.warning(f"Whisper VAD error: {e}")
+                        is_speech = energy >= energy_threshold
+                else:
+                    is_speech = energy >= energy_threshold
+                
+                # Update silence counter
+                if is_speech:
+                    silence_counter = 0
+                else:
+                    silence_counter += 1
+                
+                # Stop conditions (same as real record_until_silence)
+                if total_duration >= min_duration and speech_detected:
+                    if silence_counter >= silence_chunks_needed:
+                        log.info(f"✂️  Would stop recording: {silence_duration}s of no speech after {total_duration:.1f}s")
+                        break
+        
+        if not chunks:
+            return None
+        
+        # Concatenate all captured chunks
+        recording = np.concatenate(chunks)
+        log.info(f"📼 Simulated capture: {len(recording)/16000:.1f}s of audio ({chunk_counter} chunks)")
+        
+        return recording.flatten()
+        
+    except Exception as e:
+        log.error(f"Simulation error: {e}")
+        return None
+
+
 async def load_audio_file(file_path: str) -> Optional[np.ndarray]:
     """
     Load entire audio file for testing (non-streaming).

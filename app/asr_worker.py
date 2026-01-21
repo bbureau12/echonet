@@ -215,12 +215,12 @@ async def _handle_trigger_mode(
         return
     
     # Check if text contains any target phrase
-    phrase_map = registry.get_phrase_map()
+    phrase_list = registry.phrase_map()
     detected_target = None
     
-    for phrase in phrase_map.keys():
+    for phrase, target_name in phrase_list:
         if phrase.lower() in text.lower():
-            detected_target = phrase_map[phrase]
+            detected_target = target_name
             log.info(f"Wake word detected: '{phrase}' -> target {detected_target}")
             break
     
@@ -383,12 +383,12 @@ async def _run_test_mode(
             # Handle based on mode
             if mode == "trigger":
                 # Check for wake word
-                phrase_map = registry.get_phrase_map()
+                phrase_list = registry.phrase_map()
                 detected_target = None
                 
-                for phrase in phrase_map.keys():
+                for phrase, target_name in phrase_list:
                     if phrase.lower() in text.lower():
-                        detected_target = phrase_map[phrase]
+                        detected_target = target_name
                         log.info(f"   ✅ Wake word detected: '{phrase}' -> target {detected_target}")
                         break
                 
