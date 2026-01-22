@@ -283,3 +283,53 @@ class TestActiveModeIntegration:
         print(f"✅ Routed text: '{call_args.text}'")
         print(f"✅ Confidence: {call_args.confidence:.2f}")
         print(f"✅ Integration test PASSED: Active mode correctly routed all text (no wake word check)")
+        
+        # Verify mode was reset back to trigger
+        final_mode = mock_state_manager.get_listen_mode()
+        assert final_mode == "trigger", \
+            f"Active mode should reset to trigger after completion, but got: {final_mode}"
+        print(f"✅ Mode correctly reset to trigger after active mode completion")
+    
+    
+    @pytest.mark.asyncio
+    async def test_active_mode_resets_on_timeout(
+        self,
+        mock_state_manager,
+        mock_text_handler,
+        monkeypatch
+    ):
+        """
+        INTEGRATION TEST: Active mode should reset to trigger on timeout (no audio).
+        
+        This test:
+        1. Calls _handle_active_mode() with no audio (timeout)
+        2. Verifies mode is reset to trigger
+        3. Verifies text_handler is NOT called
+        """
+        print(f"\n🧪 Testing active mode timeout behavior")
+        
+        # Mock record_until_silence to return None (timeout)
+        async def mock_record(*args, **kwargs):
+            return None  # Simulate timeout with no audio
+        
+        from app import asr_worker
+        monkeypatch.setattr(asr_worker, 'record_until_silence', mock_record)
+        
+        # Call actual active mode handler
+        stop_event = asyncio.Event()
+        await _handle_active_mode(
+            state_manager=mock_state_manager,
+            device_index=0,
+            stop_event=stop_event
+        )
+        
+        # Verify handler was NOT called (no audio captured)
+        assert not mock_text_handler.called, \
+            "Text handler should NOT be called when no audio captured"
+        
+        # Verify mode was reset back to trigger
+        final_mode = mock_state_manager.get_listen_mode()
+        assert final_mode == "trigger", \
+            f"Active mode should reset to trigger after timeout, but got: {final_mode}"
+        
+        print(f"✅ Integration test PASSED: Active mode correctly reset to trigger on timeout")

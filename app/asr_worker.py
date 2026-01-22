@@ -250,6 +250,9 @@ async def _handle_active_mode(
     """
     Active mode: Continuous recording and transcription.
     Records until silence is detected (person stops talking).
+    
+    After completing a recording (or timing out with no audio), automatically
+    resets back to trigger mode via the state manager.
     """
     # Record until silence (full timeout for active conversation)
     audio = await record_until_silence(
@@ -263,7 +266,17 @@ async def _handle_active_mode(
         use_whisper_vad=settings.audio_use_whisper_vad
     )
     
-    if audio is None or len(audio) == 0:
+    # Check if we got audio or timed out
+    has_audio = audio is not None and len(audio) > 0
+    
+    if not has_audio:
+        # Timeout with no audio - reset to trigger mode
+        log.info("Active mode: No audio captured, resetting to trigger mode")
+        state_manager.set_listen_mode(
+            mode="trigger",
+            source="asr_worker",
+            reason="Active mode timeout with no audio"
+        )
         return
     
     # Transcribe
@@ -281,10 +294,20 @@ async def _handle_active_mode(
             )
             try:
                 await _text_handler(text_input)
+                log.info("Active mode: Recording processed successfully, resetting to trigger mode")
             except Exception as e:
                 log.error(f"Failed to route text: {e}")
         else:
             log.warning("Text handler not set, cannot route text")
+    else:
+        log.info("Active mode: Empty transcription, resetting to trigger mode")
+    
+    # After processing (success or failure), reset to trigger mode
+    state_manager.set_listen_mode(
+        mode="trigger",
+        source="asr_worker",
+        reason="Active mode recording completed"
+    )
 
 
 async def _run_test_mode(
