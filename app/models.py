@@ -50,7 +50,7 @@ class EchonetTextOut(BaseModel):
 class StateUpdate(BaseModel):
     target: str = Field(..., min_length=1, max_length=32, description="Target name that triggered the state change")
     source: str = Field(..., min_length=1, max_length=64, description="Source of the state change (e.g., 'llm', 'timeout', 'user')")
-    state: Literal["trigger", "active"] = Field(..., description="New state: 'trigger' (idle) or 'active' (listening for response)")
+    state: Literal["inactive", "trigger", "active"] = Field(..., description="New state: 'inactive' (not recording), 'trigger' (wake word detection), or 'active' (continuous recording)")
     reason: Optional[str] = Field(default=None, max_length=200, description="Optional reason for the state change")
 
 
@@ -81,3 +81,22 @@ class TranscriptionResponse(BaseModel):
     duration: float = Field(..., description="Audio duration in seconds")
     processing_time: float = Field(..., description="Time taken to transcribe in seconds")
     route_decision: Optional[RouteDecision] = Field(None, description="Routing decision if text was processed")
+
+
+class ConfigSetting(BaseModel):
+    """Configuration setting with metadata."""
+    key: str = Field(..., min_length=1, max_length=64, description="Setting key (e.g., 'enable_preroll_buffer')")
+    value: str = Field(..., description="Setting value (stored as string, type determined by key)")
+    type: Literal["bool", "int", "float", "str"] = Field(..., description="Value type for validation")
+    description: Optional[str] = Field(None, max_length=200, description="Human-readable description")
+    updated_at: Optional[str] = Field(None, description="ISO timestamp of last update")
+
+
+class ConfigUpdate(BaseModel):
+    """Request to update a configuration setting."""
+    value: str = Field(..., description="New value (will be validated against setting type)")
+
+
+class ConfigResponse(BaseModel):
+    """Response with configuration settings."""
+    settings: dict[str, ConfigSetting] = Field(..., description="Configuration settings by key")

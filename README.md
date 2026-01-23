@@ -8,13 +8,15 @@ Echonet is a lightweight **microphone listener + text event router + session man
 - **Targets:** "brains" like **EchoBell** and **Astraea** (registered via `POST /register`).
 - **Sessions:** per-source open-listen mode (wake phrase → route subsequent text to that target until timeout/cancel).
 - **Modes:**
-  - **Trigger Mode**: Listen for wake words, only transcribe when detected
-  - **Active Mode**: Continuous transcription (during LLM conversations)
+  - **Inactive Mode**: Not recording (privacy/power saving)
+  - **Trigger Mode**: Listen for wake words, only route when detected
+  - **Active Mode**: Route all audio (during LLM conversations), auto-resets
 
 ## Features
 
 ✅ **Built-in Microphone ASR**: Faster Whisper speech-to-text with voice activity detection  
-✅ **Dual Recording Modes**: Trigger (wake word) and Active (continuous listening)  
+✅ **Three Recording Modes**: Inactive (muted), Trigger (wake word), Active (continuous)  
+✅ **Auto-Reset Privacy**: Active mode automatically returns to trigger after recording  
 ✅ **Voice Activity Detection**: Stops recording when you stop talking (Whisper VAD + energy)  
 ✅ **Multi-Device Support**: Enumerate and select audio input devices at runtime  
 ✅ **Persistent Registry**: Target registrations stored in SQLite, survive restarts  

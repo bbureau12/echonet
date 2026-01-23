@@ -2,25 +2,107 @@
 
 ## Overview
 
-The ASR worker supports two operational modes with efficient state monitoring via in-memory caching.
+The ASR worker supports three operational modes with efficient state monitoring via in-memory caching.
 
 ## Modes
 
-### Trigger Mode
+EchoNet operates as a state machine with three distinct modes:
+
+```
+┌──────────┐
+│ INACTIVE │  ← Not recording (privacy/power saving)
+└────┬─────┘
+     │ ↕
+┌────┴─────┐
+│ TRIGGER  │  ← Recording with wake word detection
+└────┬─────┘
+     │ ↕
+┌────┴─────┐
+│  ACTIVE  │  ← Recording without filtering (routes all audio)
+└──────────┘
+```
+
+All transitions are bi-directional via API.
+
+### Inactive Mode
+- **Purpose**: Privacy and power management
+- **Behavior**: 
+  - **No recording** - Microphone not accessed
+  - **No transcription** - No CPU usage for ASR
+  - **No routing** - No network traffic
+  - Worker just sleeps in loop
+- **Use Cases**:
+  - Physical mute button pressed
+  - Power saving mode (battery low)
+  - Scheduled privacy hours (e.g., 10 PM - 7 AM)
+  - Testing non-audio functionality
+- **Related**: See [ADR 002](./adr/002-inactive-mode.md)
+
+### Trigger Mode (Default)
 - **Purpose**: Wake word detection
 - **Behavior**: 
-  - Records short 2-second audio clips
-  - Transcribes and checks for registered target phrases
-  - Only sends transcription if wake word is detected
-  - Conserves resources when idle
+  - Records until silence detected (VAD)
+  - Transcribes audio
+  - Checks for registered wake word phrases
+  - Only routes if wake word found
+  - Discards audio without wake words
+- **Use Cases**:
+  - "Hey Alexa" style interaction
+  - Default listening state
+  - Waiting for user intent
+- **Privacy**: Records and transcribes all audio, but only routes when wake word detected
 
 ### Active Mode
-- **Purpose**: Continuous listening (e.g., during LLM conversation)
+- **Purpose**: Continuous listening (e.g., during conversation)
 - **Behavior**:
-  - Records longer 3-second audio clips
-  - Transcribes all audio
-  - Sends all non-empty transcriptions
-  - Used when user is actively interacting
+  - Records until silence detected (VAD)
+  - Transcribes audio
+  - Routes ALL transcriptions (no wake word check)
+  - **Auto-resets to trigger mode** after completing recording
+- **Use Cases**:
+  - LLM asked a question, waiting for answer
+  - Doorbell button pressed, waiting for command
+  - Follow-up interaction without wake word
+- **Auto-Reset**: Prevents staying in "route all audio" mode indefinitely
+- **Related**: See [ADR 001](./adr/001-automatic-active-mode-reset.md)
+
+## Mode Lifecycle
+
+### Typical Interaction Flow
+
+```
+[System starts in TRIGGER mode]
+    ↓
+User: "Peter, what's the weather?"
+    ↓ (wake word "Peter" detected)
+[Routes to target, target requests ACTIVE mode]
+    ↓
+[Switches to ACTIVE mode]
+    ↓
+Target: "What city?"
+    ↓
+User: "Seattle"
+    ↓ (routes without wake word)
+[ACTIVE mode completes, auto-resets to TRIGGER]
+    ↓
+[Back in TRIGGER mode, listening for wake word]
+```
+
+### Privacy/Mute Flow
+
+```
+[User presses mute button]
+    ↓
+[API call: state=inactive]
+    ↓
+[INACTIVE mode - not recording]
+    ↓
+[User presses unmute button]
+    ↓
+[API call: state=trigger]
+    ↓
+[TRIGGER mode - listening for wake words]
+```
 
 ## State Management
 
@@ -50,7 +132,7 @@ ECHONET_SOURCE_ID=microphone
 ECHONET_ROOM=living-room
 
 # Initial mode on startup
-ECHONET_INITIAL_LISTEN_MODE=trigger  # or "active"
+ECHONET_INITIAL_LISTEN_MODE=trigger  # or "active" or "inactive"
 
 # Whisper model configuration
 ECHONET_WHISPER_MODEL=base  # tiny, base, small, medium, large
@@ -67,45 +149,55 @@ ECHONET_WHISPER_LANGUAGE=en  # language code or "auto"
 └─────────────────────────────────────────────────────────┘
                           │
                           ▼
-              ┌───────────────────────┐
-              │ Read mode from cache  │ ◄── Fast, no DB hit
-              │ (trigger or active)   │
-              └───────────┬───────────┘
+              ┌───────────────────────────────┐
+              │   Read mode from cache        │ ◄── Fast, no DB hit
+              │ (inactive/trigger/active)     │
+              └───────────┬───────────────────┘
                           │
-                ┌─────────┴─────────┐
-                │                   │
-                ▼                   ▼
-    ┌──────────────────┐   ┌──────────────────┐
-    │  Trigger Mode    │   │   Active Mode    │
-    │ (wake word)      │   │ (continuous)     │
-    └──────────────────┘   └──────────────────┘
-                │                   │
-                ▼                   ▼
-        ┌──────────────┐    ┌──────────────┐
-        │ Record 2 sec │    │ Record 3 sec │
-        └──────┬───────┘    └──────┬───────┘
-               │                   │
-               ▼                   ▼
-        ┌──────────────┐    ┌──────────────┐
-        │ Transcribe   │    │ Transcribe   │
-        └──────┬───────┘    └──────┬───────┘
-               │                   │
-               ▼                   ▼
-        ┌──────────────┐    ┌──────────────┐
-        │ Check if     │    │ Send all     │
-        │ wake word in │    │ non-empty    │
-        │ phrase map   │    │ text         │
-        └──────┬───────┘    └──────┬───────┘
-               │                   │
-        ┌──────┴──────┐            │
-        │ If detected │            │
-        └──────┬──────┘            │
-               │                   │
-               ▼                   ▼
-        ┌────────────────────────────┐
-        │   post_text_event()        │
-        │   to Echonet API           │
-        └────────────────────────────┘
+         ┌────────────────┼────────────────┐
+         │                │                │
+         ▼                ▼                ▼
+ ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+ │   Inactive   │  │   Trigger    │  │    Active    │
+ │   (muted)    │  │ (wake word)  │  │ (continuous) │
+ └──────────────┘  └──────────────┘  └──────────────┘
+         │                │                │
+         ▼                ▼                ▼
+ ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+ │ Sleep 0.5s   │  │ Record audio │  │ Record audio │
+ │ (no mic      │  │ until VAD    │  │ until VAD    │
+ │  access)     │  │ detects      │  │ detects      │
+ └──────────────┘  │ silence      │  │ silence      │
+                   └──────┬───────┘  └──────┬───────┘
+                          │                 │
+                          ▼                 ▼
+                   ┌──────────────┐  ┌──────────────┐
+                   │ Transcribe   │  │ Transcribe   │
+                   └──────┬───────┘  └──────┬───────┘
+                          │                 │
+                          ▼                 ▼
+                   ┌──────────────┐  ┌──────────────┐
+                   │ Check if     │  │ Send all     │
+                   │ wake word in │  │ non-empty    │
+                   │ phrase map   │  │ text         │
+                   └──────┬───────┘  └──────┬───────┘
+                          │                 │
+                   ┌──────┴──────┐          │
+                   │ If detected │          │
+                   └──────┬──────┘          │
+                          │                 │
+                          ▼                 ▼
+                   ┌────────────────────────────┐
+                   │   post_text_event()        │
+                   │   to Echonet API           │
+                   └────────────────────────────┘
+                                  │
+                                  ▼
+                          ┌──────────────────┐
+                          │ Auto-reset to    │
+                          │ TRIGGER mode     │
+                          │ (active only)    │
+                          └──────────────────┘
 
 
 ┌─────────────────────────────────────────────────────────┐
@@ -139,7 +231,29 @@ ECHONET_WHISPER_LANGUAGE=en  # language code or "auto"
 The `PUT /state` endpoint switches modes:
 
 ```bash
-# Switch to active mode
+# Mute (stop recording)
+curl -X PUT http://localhost:8123/state \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-key" \
+  -d '{
+    "target": "system",
+    "source": "mute_button", 
+    "state": "inactive",
+    "reason": "User pressed mute button"
+  }'
+
+# Unmute (resume listening for wake words)
+curl -X PUT http://localhost:8123/state \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-key" \
+  -d '{
+    "target": "system",
+    "source": "mute_button",
+    "state": "trigger", 
+    "reason": "User pressed unmute button"
+  }'
+
+# Switch to active mode (e.g., after wake word detected)
 curl -X PUT http://localhost:8123/state \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-key" \
@@ -150,7 +264,7 @@ curl -X PUT http://localhost:8123/state \
     "reason": "User started conversation"
   }'
 
-# Return to trigger mode
+# Return to trigger mode (manual, or happens automatically)
 curl -X PUT http://localhost:8123/state \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-key" \
@@ -187,9 +301,11 @@ async def run_asr_worker(state_manager, registry, stop_event):
         # Fast cache read (not DB query)
         mode = state_manager.get_listen_mode()
         
-        if mode == "trigger":
+        if mode == "inactive":
+            await asyncio.sleep(0.5)  # No recording
+        elif mode == "trigger":
             await _handle_trigger_mode(...)
-        else:
+        else:  # active
             await _handle_active_mode(...)
 ```
 

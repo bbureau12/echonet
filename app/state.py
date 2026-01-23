@@ -216,25 +216,29 @@ class StateManager:
         reason: Optional[str] = None
     ) -> None:
         """
-        Set listen mode to 'trigger' (idle) or 'active' (responding to LLM).
+        Set listen mode to 'inactive', 'trigger', or 'active'.
         
         Args:
-            mode: Either 'trigger' or 'active'
+            mode: One of 'inactive' (not recording), 'trigger' (wake word detection), or 'active' (continuous recording)
             source: What triggered the mode change
             reason: Why the mode changed
         """
-        if mode not in ("trigger", "active"):
-            raise ValueError(f"Invalid listen_mode: {mode}. Must be 'trigger' or 'active'")
+        if mode not in ("inactive", "trigger", "active"):
+            raise ValueError(f"Invalid listen_mode: {mode}. Must be 'inactive', 'trigger', or 'active'")
         
         self.set("listen_mode", mode, source=source, reason=reason)
     
     def is_trigger_mode(self) -> bool:
-        """Check if currently in trigger (idle) mode."""
+        """Check if currently in trigger (wake word detection) mode."""
         return self.get_listen_mode() == "trigger"
     
     def is_active_mode(self) -> bool:
-        """Check if currently in active listening mode."""
+        """Check if currently in active (continuous recording) mode."""
         return self.get_listen_mode() == "active"
+    
+    def is_inactive_mode(self) -> bool:
+        """Check if currently in inactive (not recording) mode."""
+        return self.get_listen_mode() == "inactive"
     
     async def wait_for_state_change(self, timeout: Optional[float] = None) -> bool:
         """
@@ -285,3 +289,143 @@ class StateManager:
             reason: Why the change was made
         """
         self.set("audio_device_index", str(device_index), source=source, reason=reason)
+
+    # Configuration management (separate from state)
+    
+    def get_config(self, key: str) -> Optional[dict]:
+        """
+        Get a configuration setting by key.
+        
+        Returns:
+            Dict with 'key', 'value', 'type', 'description', 'updated_at' or None if not found
+        """
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT key, value, type, description, updated_at FROM config WHERE key = ?",
+                (key,)
+            ).fetchone()
+            
+            if row is None:
+                return None
+            
+            return {
+                "key": row["key"],
+                "value": row["value"],
+                "type": row["type"],
+                "description": row["description"],
+                "updated_at": row["updated_at"]
+            }
+    
+    def get_all_config(self) -> dict[str, dict]:
+        """
+        Get all configuration settings.
+        
+        Returns:
+            Dict mapping config keys to their settings
+        """
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT key, value, type, description, updated_at FROM config ORDER BY key"
+            ).fetchall()
+            
+            return {
+                row["key"]: {
+                    "key": row["key"],
+                    "value": row["value"],
+                    "type": row["type"],
+                    "description": row["description"],
+                    "updated_at": row["updated_at"]
+                }
+                for row in rows
+            }
+    
+    def set_config(self, key: str, value: str) -> None:
+        """
+        Update a configuration setting.
+        
+        Args:
+            key: Configuration key
+            value: New value (will be validated against type)
+            
+        Raises:
+            ValueError: If key doesn't exist or value is invalid for type
+        """
+        with self._get_connection() as conn:
+            # Get current config to validate type
+            row = conn.execute(
+                "SELECT type FROM config WHERE key = ?",
+                (key,)
+            ).fetchone()
+            
+            if row is None:
+                raise ValueError(f"Configuration key '{key}' does not exist")
+            
+            value_type = row["type"]
+            
+            # Validate value matches type
+            self._validate_config_value(value, value_type)
+            
+            # Update config
+            conn.execute(
+                "UPDATE config SET value = ?, updated_at = datetime('now') WHERE key = ?",
+                (value, key)
+            )
+            conn.commit()
+    
+    def _validate_config_value(self, value: str, value_type: str) -> None:
+        """
+        Validate a config value matches its declared type.
+        
+        Raises:
+            ValueError: If value is invalid for the type
+        """
+        try:
+            if value_type == "bool":
+                if value.lower() not in ("true", "false"):
+                    raise ValueError(f"Boolean value must be 'true' or 'false', got '{value}'")
+            elif value_type == "int":
+                int(value)
+            elif value_type == "float":
+                float(value)
+            elif value_type == "str":
+                # Any string is valid
+                pass
+            else:
+                raise ValueError(f"Unknown config type: {value_type}")
+        except (ValueError, AttributeError) as e:
+            raise ValueError(f"Invalid value '{value}' for type '{value_type}': {e}")
+    
+    def get_config_bool(self, key: str, default: bool = False) -> bool:
+        """Get a boolean config value."""
+        config = self.get_config(key)
+        if config is None:
+            return default
+        return config["value"].lower() == "true"
+    
+    def get_config_int(self, key: str, default: int = 0) -> int:
+        """Get an integer config value."""
+        config = self.get_config(key)
+        if config is None:
+            return default
+        try:
+            return int(config["value"])
+        except ValueError:
+            return default
+    
+    def get_config_float(self, key: str, default: float = 0.0) -> float:
+        """Get a float config value."""
+        config = self.get_config(key)
+        if config is None:
+            return default
+        try:
+            return float(config["value"])
+        except ValueError:
+            return default
+    
+    def get_config_str(self, key: str, default: str = "") -> str:
+        """Get a string config value."""
+        config = self.get_config(key)
+        if config is None:
+            return default
+        return config["value"]
+

@@ -29,6 +29,7 @@ Each ADR follows this structure:
 | ADR | Title | Status | Date |
 |-----|-------|--------|------|
 | [001](./001-automatic-active-mode-reset.md) | Automatic Reset from Active to Trigger Mode | Accepted | 2026-01-21 |
+| [002](./002-inactive-mode.md) | Add Inactive Mode for Privacy and Power Management | Accepted | 2026-01-23 |
 
 ## Creating New ADRs
 

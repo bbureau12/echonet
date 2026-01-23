@@ -5,10 +5,68 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Optional
+from collections import deque
 import numpy as np
 import sounddevice as sd
 
 log = logging.getLogger("echonet.audio")
+
+
+class RingBuffer:
+    """
+    Ring buffer for storing recent audio chunks (pre-roll buffering).
+    
+    Maintains a fixed-duration sliding window of recent audio data
+    to capture audio before a trigger event (e.g., button press).
+    """
+    
+    def __init__(self, duration_seconds: float, sample_rate: int = 16000, channels: int = 1):
+        """
+        Initialize ring buffer.
+        
+        Args:
+            duration_seconds: How much audio history to keep
+            sample_rate: Audio sample rate
+            channels: Number of audio channels
+        """
+        self.duration_seconds = duration_seconds
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.max_chunks = int(duration_seconds / 0.1) + 1  # Assuming ~0.1s chunks
+        self._buffer: deque = deque(maxlen=self.max_chunks)
+        self._total_duration = 0.0
+    
+    def add_chunk(self, audio_chunk: np.ndarray) -> None:
+        """Add audio chunk to ring buffer (oldest chunks are automatically dropped)."""
+        chunk_duration = len(audio_chunk) / self.sample_rate
+        self._buffer.append((audio_chunk, chunk_duration))
+        self._total_duration = sum(duration for _, duration in self._buffer)
+    
+    def get_buffered_audio(self) -> Optional[np.ndarray]:
+        """
+        Get all buffered audio as a single numpy array.
+        
+        Returns:
+            Concatenated audio data or None if buffer is empty
+        """
+        if not self._buffer:
+            return None
+        
+        chunks = [chunk for chunk, _ in self._buffer]
+        return np.concatenate(chunks)
+    
+    def get_duration(self) -> float:
+        """Get total duration of buffered audio in seconds."""
+        return self._total_duration
+    
+    def clear(self) -> None:
+        """Clear the ring buffer."""
+        self._buffer.clear()
+        self._total_duration = 0.0
+    
+    def is_full(self) -> bool:
+        """Check if buffer has reached target duration."""
+        return self._total_duration >= self.duration_seconds
 
 
 @dataclass
@@ -428,7 +486,8 @@ async def record_until_silence(
     min_duration: float = 0.5,
     max_duration: float = 30.0,
     energy_threshold: float = 0.01,
-    use_whisper_vad: bool = True
+    use_whisper_vad: bool = True,
+    preroll_buffer: Optional[RingBuffer] = None
 ) -> Optional[np.ndarray]:
     """
     Record audio continuously until silence is detected.
@@ -442,6 +501,7 @@ async def record_until_silence(
         max_duration: Maximum recording duration in seconds (default: 30s)
         energy_threshold: Audio energy threshold for initial sound detection (0.0-1.0)
         use_whisper_vad: Use Faster Whisper's VAD for speech detection (default: True)
+        preroll_buffer: Optional RingBuffer to prepend buffered audio before recording
         
     Returns:
         NumPy array of audio samples (float32, -1.0 to 1.0) or None on error
@@ -452,6 +512,10 @@ async def record_until_silence(
         - Uses Faster Whisper VAD to verify actual speech (accurate)
         - Stops when no speech detected for silence_duration seconds
         - Has safety timeout at max_duration
+        
+    Pre-roll buffering:
+        - If preroll_buffer is provided, prepends buffered audio before the recording
+        - Useful for capturing audio before a trigger event (e.g., doorbell button press)
     """
     try:
         loop = asyncio.get_event_loop()
@@ -465,7 +529,8 @@ async def record_until_silence(
             min_duration,
             max_duration,
             energy_threshold,
-            use_whisper_vad
+            use_whisper_vad,
+            preroll_buffer
         )
         return audio
         
@@ -482,7 +547,8 @@ def _record_until_silence_sync(
     min_duration: float,
     max_duration: float,
     energy_threshold: float,
-    use_whisper_vad: bool
+    use_whisper_vad: bool,
+    preroll_buffer: Optional[RingBuffer] = None
 ) -> Optional[np.ndarray]:
     """Synchronous streaming VAD recording with Whisper speech detection (runs in thread pool)."""
     import queue
@@ -497,6 +563,15 @@ def _record_until_silence_sync(
     
     audio_queue = queue.Queue()
     chunks = []
+    
+    # If pre-roll buffer provided, prepend buffered audio
+    preroll_audio = None
+    if preroll_buffer is not None:
+        preroll_audio = preroll_buffer.get_buffered_audio()
+        if preroll_audio is not None:
+            preroll_duration = preroll_buffer.get_duration()
+            log.info(f"Prepending {preroll_duration:.1f}s of pre-roll audio to recording")
+    
     silence_counter = 0
     chunk_counter = 0
     speech_detected = False  # Track if we've detected any speech yet
@@ -613,6 +688,11 @@ def _record_until_silence_sync(
         
         # Concatenate all chunks
         recording = np.concatenate(chunks, axis=0)
+        
+        # Prepend pre-roll audio if available
+        if preroll_audio is not None:
+            log.debug(f"Prepending {len(preroll_audio)} samples of pre-roll audio")
+            recording = np.concatenate([preroll_audio, recording], axis=0)
         
         # Convert to mono if stereo
         if channels > 1:

@@ -14,7 +14,8 @@ from app.audio_io import list_audio_devices, get_default_device, AudioDevice
 
 from .models import (
     RouteDecision, SessionState, TargetRegistration, TextIn, EchonetTextOut, StateUpdate,
-    AudioDeviceInfo, AudioDeviceList, AudioDeviceSelection, TranscriptionResponse
+    AudioDeviceInfo, AudioDeviceList, AudioDeviceSelection, TranscriptionResponse,
+    ConfigSetting, ConfigUpdate, ConfigResponse
 )
 from .registry import Target, TargetRegistryRepository
 from .router import PhraseRouter, SessionManager
@@ -346,6 +347,95 @@ async def update_state(request: Request, update: StateUpdate):
         return JSONResponse(
             status_code=400,
             content={"ok": False, "error": str(e)}
+        )
+
+
+# ========== Configuration Endpoints ==========
+
+@app.get("/config", response_model=ConfigResponse, tags=["configuration"])
+async def get_all_config():
+    """
+    Get all configuration settings.
+    
+    Returns all runtime configuration with their current values,
+    types, and descriptions.
+    """
+    config_dict = state.get_all_config()
+    
+    # Convert to ConfigSetting objects
+    settings_dict = {
+        key: ConfigSetting(
+            key=cfg["key"],
+            value=cfg["value"],
+            type=cfg["type"],
+            description=cfg["description"],
+            updated_at=cfg["updated_at"]
+        )
+        for key, cfg in config_dict.items()
+    }
+    
+    return ConfigResponse(settings=settings_dict)
+
+
+@app.get("/config/{key}", response_model=ConfigSetting, tags=["configuration"])
+async def get_config(key: str):
+    """
+    Get a specific configuration setting by key.
+    
+    Example keys:
+    - enable_preroll_buffer
+    - preroll_buffer_seconds
+    """
+    config = state.get_config(key)
+    
+    if config is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Configuration key '{key}' not found"
+        )
+    
+    return ConfigSetting(
+        key=config["key"],
+        value=config["value"],
+        type=config["type"],
+        description=config["description"],
+        updated_at=config["updated_at"]
+    )
+
+
+@app.put("/config/{key}", response_model=ConfigSetting, tags=["configuration"])
+async def update_config(request: Request, key: str, update: ConfigUpdate):
+    """
+    Update a configuration setting.
+    
+    The value will be validated against the setting's declared type.
+    Requires admin key if configured.
+    
+    Example:
+        PUT /config/enable_preroll_buffer
+        {"value": "true"}
+    """
+    # Optional admin key
+    resp = require_admin_key(request)
+    if resp is not None:
+        return resp
+    
+    try:
+        state.set_config(key, update.value)
+        
+        # Return updated config
+        config = state.get_config(key)
+        return ConfigSetting(
+            key=config["key"],
+            value=config["value"],
+            type=config["type"],
+            description=config["description"],
+            updated_at=config["updated_at"]
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
         )
 
 

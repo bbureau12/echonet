@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     db_path: str = "echonet_registry.db"
     
     # Initial state on startup
-    initial_listen_mode: str = "trigger"  # "trigger" or "active"
+    initial_listen_mode: str = "trigger"  # "inactive", "trigger", or "active"
     
     # ASR (Faster Whisper) settings
     whisper_model: str = "base"  # tiny, base, small, medium, large-v2, large-v3

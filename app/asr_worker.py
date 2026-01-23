@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import numpy as np
 from faster_whisper import WhisperModel
-from .audio_io import record_until_silence, load_audio_file, stream_audio_file
+from .audio_io import record_until_silence, load_audio_file, stream_audio_file, RingBuffer
 from .state import StateManager
 from .registry import TargetRegistryRepository
 from .models import TextIn
@@ -170,12 +170,19 @@ async def run_asr_worker(
                 log.info(f"Audio device changed: {device_index} -> {cached_device}")
                 device_index = cached_device
         
-        if mode == "trigger":
+        if mode == "inactive":
+            # Inactive mode: do nothing, just sleep
+            await asyncio.sleep(0.5)
+        elif mode == "trigger":
             # Trigger mode: listen for wake words
             await _handle_trigger_mode(state_manager, registry, device_index, stop_event)
-        else:  # active
+        elif mode == "active":
             # Active mode: continuous recording
             await _handle_active_mode(state_manager, device_index, stop_event)
+        else:
+            # Unknown mode, sleep briefly
+            log.warning(f"Unknown listen mode: {mode}")
+            await asyncio.sleep(0.5)
         
         # Small sleep to prevent tight loop
         await asyncio.sleep(0.05)

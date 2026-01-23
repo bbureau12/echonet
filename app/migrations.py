@@ -49,6 +49,7 @@ class MigrationManager:
             migrations = [
                 (1, self._migrate_v1_initial_schema),
                 (2, self._migrate_v2_state_tracking),
+                (3, self._migrate_v3_config_settings),
             ]
             
             for version, migration_func in migrations:
@@ -146,6 +147,45 @@ class MigrationManager:
         
         conn.commit()
         log.info("Created state tracking: settings, settings_log tables with default listen_mode")
+
+    def _migrate_v3_config_settings(self, conn: sqlite3.Connection) -> None:
+        """
+        Migration v3: Configuration settings
+        - Create config table for runtime configuration
+        - Separate from settings table (which is for state like listen_mode)
+        - Initialize default configuration values
+        """
+        # Config table for runtime configuration
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                type TEXT NOT NULL CHECK(type IN ('bool', 'int', 'float', 'str')),
+                description TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        
+        # Index for efficient lookups
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_config_key 
+            ON config(key)
+        """)
+        
+        # Initialize default configuration values
+        default_configs = [
+            ('enable_preroll_buffer', 'false', 'bool', 'Enable pre-roll audio buffering (capture audio before trigger)'),
+            ('preroll_buffer_seconds', '2.0', 'float', 'Seconds of audio to buffer before trigger event'),
+        ]
+        
+        for key, value, value_type, description in default_configs:
+            conn.execute("""
+                INSERT INTO config (key, value, type, description)
+                VALUES (?, ?, ?, ?)
+            """, (key, value, value_type, description))
+        
+        conn.commit()
+        log.info("Created config table with default values (preroll_buffer settings)")
 
 
 def run_migrations(db_path: str | Path) -> None:
